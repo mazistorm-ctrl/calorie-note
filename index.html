@@ -275,7 +275,7 @@ const DEFAULT_PROFILE = {sex:"m",age:35,height:170,weight:72,goal:65,activity:1.
 
 /* ---------- 状態 ---------- */
 const S = {
-  profile:null, days:{}, foods:[],
+  profile:null, days:{}, foods:[], aiCache:{},
   date: ymd(new Date()), tab:"today",
   sheet:null, mode:"local", sampleOK:false, imagesOK:false, apiKey:"",
   range:30,
@@ -286,8 +286,8 @@ function apiKeyLoad(){ try{ return localStorage.getItem(LS_KEY) || ""; }catch(e)
 function apiKeySave(v){ try{ v ? localStorage.setItem(LS_KEY, v) : localStorage.removeItem(LS_KEY); }catch(e){} }
 // claude.ai の中で開いたときは sample 機能、Vercel などで開いたときは /api/estimate（合言葉が必要）でAI推定する
 const API_MODE = !window.claude?.use && /^https?:$/.test(location.protocol) && !/^(localhost|127\.0\.0\.1)$/.test(location.hostname) || false;
-function lsLoad(){ try{ const j = JSON.parse(localStorage.getItem(LS)||"null"); if(j){ S.profile=j.profile||null; S.days=j.days||{}; S.foods=j.foods||[]; } }catch(e){} S.apiKey = apiKeyLoad(); }
-function lsSave(){ try{ localStorage.setItem(LS, JSON.stringify({profile:S.profile,days:S.days,foods:S.foods})); }catch(e){} }
+function lsLoad(){ try{ const j = JSON.parse(localStorage.getItem(LS)||"null"); if(j){ S.profile=j.profile||null; S.days=j.days||{}; S.foods=j.foods||[]; S.aiCache=j.aiCache||{}; } }catch(e){} S.apiKey = apiKeyLoad(); }
+function lsSave(){ try{ localStorage.setItem(LS, JSON.stringify({profile:S.profile,days:S.days,foods:S.foods,aiCache:S.aiCache})); }catch(e){} }
 
 let db = null, sample = null;
 const chains = {};
@@ -301,6 +301,19 @@ function persist(path, data){
 const saveDay = d => persist("days/"+d, S.days[d]);
 const saveProfile = () => persist("settings/profile", S.profile);
 const saveFoods = () => persist("settings/foods", {items:S.foods});
+const saveAiCache = () => persist("settings/aicache", {entries:S.aiCache});
+
+/* ---------- AI推定の記憶（同じ文章なら2回目からはAIを使わない） ---------- */
+const AI_CACHE_MAX = 300;
+const normText = s => String(s||"").normalize("NFKC").toLowerCase().replace(/[\s、。，．,.・!！?？]+/g,"");
+function aiCacheGet(text){ const k = normText(text); return k ? S.aiCache[k] || null : null; }
+function aiCachePut(text, items, note){
+  const k = normText(text); if(!k) return;
+  S.aiCache[k] = {text: String(text).slice(0,200), items: items.map(({name,kcal,p,f,c})=>({name,kcal,p,f,c})), note: note||"", at: Date.now()};
+  const keys = Object.keys(S.aiCache);
+  if(keys.length > AI_CACHE_MAX){ keys.sort((a,b)=>S.aiCache[a].at-S.aiCache[b].at).slice(0, keys.length-AI_CACHE_MAX).forEach(x=>delete S.aiCache[x]); }
+  saveAiCache();
+}
 
 /* ---------- 計算 ---------- */
 function ymd(dt){ const y=dt.getFullYear(), m=String(dt.getMonth()+1).padStart(2,"0"), d=String(dt.getDate()).padStart(2,"0"); return `${y}-${m}-${d}`; }
@@ -574,11 +587,11 @@ function openAdd(slot){
   render();
   setTimeout(()=>{ const i=$("#food-q"); if(i && matchMedia("(pointer:fine)").matches) i.focus(); },30);
 }
-function recentFoods(){
+function recentFoods(limit=12){
   const seen=new Map();
   for(const k of Object.keys(S.days).sort().reverse()){
     for(const m of S.days[k].meals){ if(!seen.has(m.name)) seen.set(m.name,{name:m.name,unit:"最近",kcal:m.kcal/(m.qty||1),p:(m.p||0)/(m.qty||1),f:(m.f||0)/(m.qty||1),c:(m.c||0)/(m.qty||1),src:"recent"}); }
-    if(seen.size>=12) break;
+    if(seen.size>=limit) break;
   }
   return [...seen.values()];
 }
@@ -593,7 +606,7 @@ function searchResults(q){
     return [...favs, ...rec, ...FOODS];
   }
   const seen=new Set(), out=[];
-  for(const f of [...favs, ...recentFoods(), ...FOODS]) if(match(f) && !seen.has(f.name)){ seen.add(f.name); out.push(f); }
+  for(const f of [...favs, ...recentFoods(Infinity), ...FOODS]) if(match(f) && !seen.has(f.name)){ seen.add(f.name); out.push(f); }
   return out;
 }
 function renderSheet(){
@@ -611,6 +624,7 @@ function renderSheet(){
     body = aiReady ? `
       <div class="field"><label for="ai-text">食べたものを書いてください</label>
       <textarea id="ai-text" class="input" placeholder="例：カツ丼の大盛りと味噌汁、食後にアイスコーヒー" data-act="ai-text">${esc(sh.aiText)}</textarea></div>
+      <div id="ai-suggest">${aiSuggestHtml(sh)}</div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
         <button class="btn" data-act="ai-run" ${sh.aiBusy?"disabled":""}>${sh.aiBusy?"推定中…":"カロリーを推定"}</button>
         ${(S.imagesOK || API_MODE)?`<label class="btn ghost" style="display:inline-block">写真から推定<input type="file" accept="image/*" data-act="ai-photo" hidden ${sh.aiBusy?"disabled":""}></label>`:""}
@@ -648,11 +662,24 @@ function foodListHtml(sh){
   if(!res.length) return `<div class="empty">「${esc(sh.q)}」は見つかりませんでした。</div>`;
   return res.map((f,i)=>`<button class="food" data-act="pick" data-i="${i}"><span class="n">${esc(f.name)}${f.src==="fav"?'<span class="tag">登録</span>':f.src==="recent"?'<span class="tag">最近</span>':""}<small>${esc(f.unit||"")}${sh.qty!==1?` ×${sh.qty}`:""}</small></span><span class="k num">${fmt(f.kcal*sh.qty)} kcal</span></button>`).join("");
 }
+// 入力中の文字に合う、過去の記録・登録済みの食品を出す（タップで追加。AIは使わない）
+function aiSuggestList(sh){
+  const q = (sh.aiText||"").trim();
+  if(q.length < 2 || sh.ai) return [];
+  return searchResults(q).slice(0,4);
+}
+function aiSuggestHtml(sh){
+  const list = aiSuggestList(sh);
+  if(!list.length) return "";
+  return `<div class="muted" style="margin:2px 0 6px">過去の記録にあります（タップで追加・AIは使いません）</div>
+    <div class="list">${list.map((f,i)=>`<button class="food" data-act="ai-pick" data-i="${i}"><span class="n">${esc(f.name)}${f.src==="fav"?'<span class="tag">登録</span>':f.src==="recent"?'<span class="tag">記録済み</span>':""}<small>${esc(f.unit||"")}</small></span><span class="k num">${fmt(f.kcal)} kcal</span></button>`).join("")}</div>`;
+}
 function aiResultHtml(ai){
   if(ai.error) return `<div class="ai-note" style="color:var(--over)">${esc(ai.error)}</div>`;
   const items = ai.items;
   const sum = items.filter(x=>x.on).reduce((a,x)=>a+x.kcal,0);
   return `<div class="ai-out">
+    ${ai.cached?`<div class="ai-note" style="display:flex;gap:8px;align-items:center;justify-content:space-between;flex-wrap:wrap"><span>前にAIで推定した結果です（今回はAIを使っていません）</span><button class="btn ghost small" data-act="ai-rerun">AIで推定し直す</button></div>`:""}
     ${items.map((x,i)=>`<label class="ai-item"><input type="checkbox" data-act="ai-toggle" data-i="${i}" ${x.on?"checked":""}><span>${esc(x.name)}<small class="muted num" style="display:block">P ${g1(x.p)} · F ${g1(x.f)} · C ${g1(x.c)}</small></span><span class="num">${fmt(x.kcal)} kcal</span></label>`).join("")}
     ${ai.note?`<div class="ai-note">${esc(ai.note)}</div>`:""}
     <label class="check"><input type="checkbox" id="ai-fav" ${S.sheet.fav?"checked":""} data-act="fav"> よく食べるものに登録</label>
@@ -707,8 +734,12 @@ async function estimateViaApi(text, file, signal){
   }
   return j;
 }
-async function runAI(text, file){
+async function runAI(text, file, force=false){
   const sh = S.sheet; if(sh.aiBusy) return;
+  if(!file && !force){
+    const hit = aiCacheGet(text);
+    if(hit){ sh.ai = {items: hit.items.map(x=>({...x,on:true})), note: hit.note, cached:true}; renderSheet(); return; }
+  }
   const useApi = !sample && API_MODE && S.apiKey;
   if(!sample && !useApi) return;
   sh.aiBusy = true; sh.ai = null; renderSheet();
@@ -725,6 +756,7 @@ async function runAI(text, file){
     const items = (Array.isArray(r?.items)?r.items:[]).map(x=>({name:String(x.name||"不明"),kcal:Math.max(0,+x.kcal||0),p:Math.max(0,+x.p||0),f:Math.max(0,+x.f||0),c:Math.max(0,+x.c||0),on:true})).filter(x=>x.kcal>0);
     if(S.sheet!==sh) return;
     sh.ai = items.length ? {items, note: r.note ? String(r.note) : ""} : {error:"食べ物として読み取れませんでした。料理名をもう少し具体的に書いてください。"};
+    if(items.length && !file) aiCachePut(text, items, sh.ai.note);
   }catch(e){
     if(S.sheet!==sh) return;
     if(e?.name === "AbortError") return;
@@ -758,13 +790,15 @@ document.addEventListener("click", e => {
     case "del-food": { const [f]=S.foods.splice(+el.dataset.i,1); saveFoods(); render(); if(f) toast(`${f.name}を登録から外しました`); break; }
     case "sex": { readProfileForm(S.draft); S.draft.sex=v; el.parentElement.querySelectorAll("button").forEach(b=>b.setAttribute("aria-pressed", b===el)); $("#calc").innerHTML=calcHtml(S.draft); break; }
     case "range": S.range=+v; render(); break;
+    case "ai-pick": { const f=aiSuggestList(sh)[+el.dataset.i]; if(!f) break; addMeal(f,1); toast(`${f.name}（${fmt(f.kcal)} kcal）を追加しました`); closeSheet(); break; }
+    case "ai-rerun": { const t=(sh.aiText||"").trim(); if(t) runAI(t, null, true); break; }
     case "ai-run": { const t=($("#ai-text")?.value||"").trim(); sh.aiText=t; if(!t){ toast("食べたものを入力してください"); break; } runAI(t); break; }
     case "ai-add": { const on=sh.ai.items.filter(x=>x.on); on.forEach(x=>{ addMeal(x,1); if(sh.fav) addFav({...x,unit:"AI推定"}); }); toast(`${on.length}品を追加しました`); closeSheet(); break; }
     case "import-toggle": S.importOpen = !S.importOpen; render(); break;
     case "goto-settings": closeSheet(); S.tab = "settings"; S.draft = null; window.scrollTo(0,0); render(); break;
     case "apikey-clear": S.apiKey = ""; apiKeySave(""); render(); toast("合言葉を削除しました"); break;
     case "import-run": importData($("#import-text")?.value || ""); break;
-    case "export": { const txt=JSON.stringify({profile:S.profile,foods:S.foods,days:S.days},null,1); navigator.clipboard?.writeText(txt).then(()=>toast("コピーしました"),()=>toast("コピーできませんでした")) ?? toast("コピーできませんでした"); break; }
+    case "export": { const txt=JSON.stringify({profile:S.profile,foods:S.foods,days:S.days,aiCache:S.aiCache},null,1); navigator.clipboard?.writeText(txt).then(()=>toast("コピーしました"),()=>toast("コピーできませんでした")) ?? toast("コピーできませんでした"); break; }
   }
 });
 function importData(text){
@@ -777,6 +811,7 @@ function importData(text){
     S.days[k] = {meals: Array.isArray(v.meals) ? v.meals : [], weight: v.weight ?? null, exercise: v.exercise || 0};
     saveDay(k); n++;
   }
+  if(j.aiCache && typeof j.aiCache === "object"){ Object.assign(S.aiCache, j.aiCache); saveAiCache(); }
   if(Array.isArray(j.foods)){
     let added = false;
     for(const f of j.foods){ if(f && f.name && !S.foods.some(x=>x.name===f.name)){ S.foods.push(f); added = true; } }
@@ -789,7 +824,7 @@ function importData(text){
 document.addEventListener("input", e => {
   const a = e.target.dataset?.act, sh=S.sheet;
   if(a==="q"){ sh.q=e.target.value; $("#food-list").innerHTML=foodListHtml(sh); }
-  if(a==="ai-text"){ sh.aiText=e.target.value; }
+  if(a==="ai-text"){ sh.aiText=e.target.value; if(sh.ai && !sh.aiBusy){ sh.ai=null; const out=$(".ai-out"); if(out) out.remove(); } const box=$("#ai-suggest"); if(box) box.innerHTML=aiSuggestHtml(sh); }
   if(e.target.form?.id==="profile-form" && S.draft){ readProfileForm(S.draft); $("#calc").innerHTML=calcHtml(S.draft); $("#pf-override").placeholder=Math.round(plan(undefined,{...S.draft,override:0}).auto); }
   if(sh && e.target.form?.id==="manual-form"){ const n=e.target.name; if(n in sh.manual) sh.manual[n]=e.target.value; if(n==="fav") sh.fav=e.target.checked; }
 });
@@ -854,6 +889,7 @@ if(window.claude?.use){
     db = d; S.mode="db";
     let firstDays=true;
     db.doc("settings/profile").onSnapshot(s => { if(s.exists){ S.profile={...s.data()}; } lsSave(); if(!S.sheet && S.tab!=="settings") render(); }, ()=>{});
+    db.doc("settings/aicache").onSnapshot(s => { if(s.exists){ S.aiCache={...(s.data().entries||{})}; } lsSave(); }, ()=>{});
     db.doc("settings/foods").onSnapshot(s => { if(s.exists){ S.foods=[...(s.data().items||[])]; } lsSave(); if(!S.sheet) render(); }, ()=>{});
     db.collection("days").onSnapshot(q => {
       const next={};
