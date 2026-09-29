@@ -1,0 +1,10 @@
+{
+  "name": "calorie-note",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "自分専用のカロリー計算・ダイエット記録アプリ",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.129.0"
+  }
+}

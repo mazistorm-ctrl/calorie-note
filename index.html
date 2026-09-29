@@ -277,11 +277,16 @@ const DEFAULT_PROFILE = {sex:"m",age:35,height:170,weight:72,goal:65,activity:1.
 const S = {
   profile:null, days:{}, foods:[],
   date: ymd(new Date()), tab:"today",
-  sheet:null, mode:"local", sampleOK:false, imagesOK:false,
+  sheet:null, mode:"local", sampleOK:false, imagesOK:false, apiKey:"",
   range:30,
 };
 const LS = "kcal-note-v1";
-function lsLoad(){ try{ const j = JSON.parse(localStorage.getItem(LS)||"null"); if(j){ S.profile=j.profile||null; S.days=j.days||{}; S.foods=j.foods||[]; } }catch(e){} }
+const LS_KEY = "kcal-note-app-key";
+function apiKeyLoad(){ try{ return localStorage.getItem(LS_KEY) || ""; }catch(e){ return ""; } }
+function apiKeySave(v){ try{ v ? localStorage.setItem(LS_KEY, v) : localStorage.removeItem(LS_KEY); }catch(e){} }
+// claude.ai の中で開いたときは sample 機能、Vercel などで開いたときは /api/estimate（合言葉が必要）でAI推定する
+const API_MODE = !window.claude?.use && /^https?:$/.test(location.protocol) && !/^(localhost|127\.0\.0\.1)$/.test(location.hostname) || false;
+function lsLoad(){ try{ const j = JSON.parse(localStorage.getItem(LS)||"null"); if(j){ S.profile=j.profile||null; S.days=j.days||{}; S.foods=j.foods||[]; } }catch(e){} S.apiKey = apiKeyLoad(); }
 function lsSave(){ try{ localStorage.setItem(LS, JSON.stringify({profile:S.profile,days:S.days,foods:S.foods})); }catch(e){} }
 
 let db = null, sample = null;
@@ -541,6 +546,13 @@ function viewSettings(){
   <div class="section-h"><h2>よく食べるもの</h2><span class="muted">${S.foods.length}件</span></div>
   <div class="list">${S.foods.length ? S.foods.map((f,i)=>`<div class="food" style="cursor:default"><span class="n">${esc(f.name)}<small class="num">${fmt(f.kcal)} kcal · P ${g1(f.p)} F ${g1(f.f)} C ${g1(f.c)}</small></span><button class="x" data-act="del-food" data-i="${i}" aria-label="${esc(f.name)}を削除">✕</button></div>`).join("") : `<div class="empty">食事を追加するときに「よく食べるものに登録」をオンにすると、ここに入ります。</div>`}</div>
 
+  ${API_MODE ? `<div class="section-h"><h2>AI推定</h2></div>
+  <form class="card form" id="apikey-form">
+    <div class="field"><label for="api-key">合言葉（Vercelの APP_KEY に設定した文字列）</label>
+      <input id="api-key" name="key" class="input" type="password" autocomplete="off" value="${esc(S.apiKey)}" placeholder="設定すると「AIで推定」が使えます"></div>
+    <div class="hint">${S.apiKey ? "設定済みです。この端末のブラウザにだけ保存されています。" : "文章や写真から、AIがカロリーとPFCを推定できるようになります。"}</div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn small" type="submit">保存する</button>${S.apiKey ? `<button class="btn ghost small" type="button" data-act="apikey-clear">削除する</button>` : ""}</div>
+  </form>` : ""}
   <div class="section-h"><h2>データ</h2></div>
   <div class="card form">
     <div class="hint">${S.mode==="db" ? "記録はクラウドに保存され、スマホとパソコンのどちらで開いても同じデータが見られます。見られるのはあなただけです。" : "記録はこのブラウザの中にだけ保存されています。"}</div>
@@ -595,15 +607,18 @@ function renderSheet(){
       <div class="list" id="food-list">${foodListHtml(sh)}</div>
       <p class="muted">見つからないときは「AIで推定」か「手入力」へ。</p>`;
   } else if(sh.sub==="ai"){
-    body = S.sampleOK ? `
+    const aiReady = S.sampleOK || (API_MODE && S.apiKey);
+    body = aiReady ? `
       <div class="field"><label for="ai-text">食べたものを書いてください</label>
       <textarea id="ai-text" class="input" placeholder="例：カツ丼の大盛りと味噌汁、食後にアイスコーヒー" data-act="ai-text">${esc(sh.aiText)}</textarea></div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
         <button class="btn" data-act="ai-run" ${sh.aiBusy?"disabled":""}>${sh.aiBusy?"推定中…":"カロリーを推定"}</button>
-        ${S.imagesOK?`<label class="btn ghost" style="display:inline-block">写真から推定<input type="file" accept="image/*" data-act="ai-photo" hidden ${sh.aiBusy?"disabled":""}></label>`:""}
+        ${(S.imagesOK || API_MODE)?`<label class="btn ghost" style="display:inline-block">写真から推定<input type="file" accept="image/*" data-act="ai-photo" hidden ${sh.aiBusy?"disabled":""}></label>`:""}
       </div>
       ${sh.ai ? aiResultHtml(sh.ai) : `<div class="ai-note">料理名だけでも大丈夫です。量（大盛り、半分など）やお店の名前を書くと精度が上がります。推定値なので、パッケージに表示があればそちらを優先してください。</div>`}`
-      : `<div class="ai-note">AIでの推定は、claude.ai 上でこのページを開いているときだけ使えます。「手入力」から記録してください。</div>`;
+      : API_MODE ? `<div class="ai-note">AIでの推定を使うには、「設定」タブでAI推定の合言葉を入力してください。</div>
+      <button class="btn ghost small" data-act="goto-settings" style="justify-self:start">設定を開く</button>`
+      : `<div class="ai-note">AIでの推定は、ネット上に公開したアプリ（Vercelなど）か claude.ai 上で開いているときに使えます。「手入力」から記録してください。</div>`;
   } else {
     const m = sh.manual;
     body = `<form class="form" id="manual-form">
@@ -664,22 +679,57 @@ const AI_PROMPT = `あなたは日本の管理栄養士です。ユーザーが�
 次のJSONだけを返してください:
 {"items":[{"name":"品目名(量)","kcal":数値,"p":数値,"f":数値,"c":数値}],"note":"推定の前提を1文で"}`;
 let aiCtl = null;
+// 写真は長辺1280pxのJPEGに縮小してから送る（通信量とAPIの上限対策）
+function shrinkImage(file){
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file), img = new Image();
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      const max = 1280, r = Math.min(1, max / Math.max(img.naturalWidth, img.naturalHeight));
+      const cv = document.createElement("canvas");
+      cv.width = Math.round(img.naturalWidth * r); cv.height = Math.round(img.naturalHeight * r);
+      cv.getContext("2d").drawImage(img, 0, 0, cv.width, cv.height);
+      const dataUrl = cv.toDataURL("image/jpeg", 0.85);
+      resolve({ media_type: "image/jpeg", data: dataUrl.slice(dataUrl.indexOf(",") + 1) });
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(Object.assign(new Error("image"), { code: "image_rejected" })); };
+    img.src = url;
+  });
+}
+async function estimateViaApi(text, file, signal){
+  const body = { text };
+  if(file) body.image = await shrinkImage(file);
+  const res = await fetch("api/estimate", { method: "POST", signal, headers: { "content-type": "application/json", "x-app-key": S.apiKey }, body: JSON.stringify(body) });
+  const j = await res.json().catch(() => null);
+  if(!res.ok){
+    const code = j?.code || (res.status === 401 ? "unauthorized" : res.status === 429 ? "rate_limited" : "server");
+    throw Object.assign(new Error(j?.error || "推定できませんでした"), { code, apiMessage: j?.error });
+  }
+  return j;
+}
 async function runAI(text, file){
-  const sh = S.sheet; if(!sample || sh.aiBusy) return;
+  const sh = S.sheet; if(sh.aiBusy) return;
+  const useApi = !sample && API_MODE && S.apiKey;
+  if(!sample && !useApi) return;
   sh.aiBusy = true; sh.ai = null; renderSheet();
   aiCtl = new AbortController();
   try{
+    let r;
+    if(useApi){ r = await estimateViaApi(text, file, aiCtl.signal); }
+    else {
     const input = file ? AI_PROMPT + "\n\n画像は食事の写真です。写っている料理を推定してください。" + (text?`\n補足: ${text}`:"") : AI_PROMPT + "\n\n食べたもの: " + text;
     const opts = {signal:aiCtl.signal, modelTier: file ? "default" : "quick"};
     if(file) opts.images = file;
-    const r = await sample.json(input, opts);
+    r = await sample.json(input, opts);
+    }
     const items = (Array.isArray(r?.items)?r.items:[]).map(x=>({name:String(x.name||"不明"),kcal:Math.max(0,+x.kcal||0),p:Math.max(0,+x.p||0),f:Math.max(0,+x.f||0),c:Math.max(0,+x.c||0),on:true})).filter(x=>x.kcal>0);
     if(S.sheet!==sh) return;
     sh.ai = items.length ? {items, note: r.note ? String(r.note) : ""} : {error:"食べ物として読み取れませんでした。料理名をもう少し具体的に書いてください。"};
   }catch(e){
     if(S.sheet!==sh) return;
-    const msg = {not_granted:"AIの利用が許可されませんでした。手入力で記録できます。", rate_limited:"少し時間をおいてからもう一度試してください。", invalid_json:"うまく読み取れませんでした。もう一度試してください。", cancelled:null, image_rejected:"この画像は読み込めませんでした。JPEGかPNGの写真を選んでください。"}[e?.code];
-    sh.ai = msg===null ? null : {error: msg || "推定できませんでした（"+(e?.code||"error")+"）。"};
+    if(e?.name === "AbortError") return;
+    const msg = {not_granted:"AIの利用が許可されませんでした。手入力で記録できます。", rate_limited:"少し時間をおいてからもう一度試してください。", invalid_json:"うまく読み取れませんでした。もう一度試してください。", cancelled:null, image_rejected:"この画像は読み込めませんでした。JPEGかPNGの写真を選んでください。", unauthorized:"合言葉が違います。「設定」タブで確認してください。", not_configured:"サーバーの設定が終わっていません。Vercelの環境変数（ANTHROPIC_API_KEY・APP_KEY）を確認してください。"}[e?.code];
+    sh.ai = msg===null ? null : {error: msg || e?.apiMessage || "推定できませんでした（"+(e?.code||"error")+"）。"};
   }finally{
     sh.aiBusy = false;
     if(S.sheet===sh) renderSheet();
@@ -711,6 +761,8 @@ document.addEventListener("click", e => {
     case "ai-run": { const t=($("#ai-text")?.value||"").trim(); sh.aiText=t; if(!t){ toast("食べたものを入力してください"); break; } runAI(t); break; }
     case "ai-add": { const on=sh.ai.items.filter(x=>x.on); on.forEach(x=>{ addMeal(x,1); if(sh.fav) addFav({...x,unit:"AI推定"}); }); toast(`${on.length}品を追加しました`); closeSheet(); break; }
     case "import-toggle": S.importOpen = !S.importOpen; render(); break;
+    case "goto-settings": closeSheet(); S.tab = "settings"; S.draft = null; window.scrollTo(0,0); render(); break;
+    case "apikey-clear": S.apiKey = ""; apiKeySave(""); render(); toast("合言葉を削除しました"); break;
     case "import-run": importData($("#import-text")?.value || ""); break;
     case "export": { const txt=JSON.stringify({profile:S.profile,foods:S.foods,days:S.days},null,1); navigator.clipboard?.writeText(txt).then(()=>toast("コピーしました"),()=>toast("コピーできませんでした")) ?? toast("コピーできませんでした"); break; }
   }
@@ -775,6 +827,10 @@ document.addEventListener("submit", e => {
     const t=ymd(new Date()), d=S.days[t];
     if(d?.weight!==p.weight){ ensureDay(t).weight=p.weight; saveDay(t); }
     render(); toast("保存しました");
+  }
+  if(f.id==="apikey-form"){
+    const v = f.elements.key.value.trim();
+    S.apiKey = v; apiKeySave(v); render(); toast(v ? "合言葉を保存しました" : "合言葉を削除しました");
   }
   if(f.id==="manual-form"){
     const el=f.elements, item={name:el.name.value.trim(),kcal:+el.kcal.value||0,p:+el.p.value||0,f:+el.f.value||0,c:+el.c.value||0,unit:"手入力"};

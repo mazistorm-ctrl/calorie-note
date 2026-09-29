@@ -17,6 +17,7 @@
 | `index.html` | アプリ本体（HTML・CSS・JS） |
 | `manifest.webmanifest` | PWAの設定（名前・アイコン・表示方法） |
 | `sw.js` | オフライン用のService Worker |
+| `api/estimate.js` | AIでカロリーを推定するVercelの関数（Claude APIを呼ぶ） |
 | `icons/` | アイコン（`icon.svg` が元データ） |
 
 ## データの保存先
@@ -29,6 +30,26 @@
 Vercelで「Add New → Project」からこのリポジトリをImportし、Framework Presetは「Other」のまま、設定は変えずにDeployします。以降は `main` にpushするたびに自動で更新されます。
 
 アプリを更新したあと、オフライン用のキャッシュを入れ替えたいときは `sw.js` の `CACHE` の番号を上げてください。
+
+## AIでのカロリー推定を使う
+
+`api/estimate.js` がVercel上でClaude APIを呼びます。APIキーはサーバー側にだけ置き、アプリからは「合言葉」で呼び出します。
+
+1. https://platform.claude.com でAPIキーを作る（`sk-ant-...`）
+2. Vercelのプロジェクト → Settings → Environment Variables に次の2つを追加する
+
+   | 名前 | 値 |
+   |---|---|
+   | `ANTHROPIC_API_KEY` | 1で作ったAPIキー |
+   | `APP_KEY` | 自分で決めた合言葉（長めのランダムな文字列がおすすめ） |
+
+   任意：`CLAUDE_MODEL` にモデルIDを入れると変更できます（省略時は `claude-opus-5-5`）。
+3. Deployments から最新のデプロイを **Redeploy** する（環境変数は再デプロイで反映されます）
+4. アプリの「設定」タブ →「AI推定」に `APP_KEY` と同じ合言葉を入れて保存する
+
+これで、食事を追加するときの「AIで推定」タブで、文章や写真からカロリーとPFCを推定できます。合言葉は端末ごとに入力が必要です。
+
+料金はAPIの利用量に応じてかかります（1回の推定はおおむね1円前後。写真は数円）。使いすぎが心配なときは、platform.claude.com の Usage limits で上限を設定してください。
 
 ## スマホに入れる
 
