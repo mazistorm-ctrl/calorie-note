@@ -1,7 +1,20 @@
 <!doctype html>
-<html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<style>:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}body{margin:0}img{max-width:100%}[hidden]{display:none!important}</style></head><body>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>カロリーノート</title>
+<meta name="description" content="自分専用のカロリー計算・ダイエット記録アプリ">
+<meta name="theme-color" content="#F2F4F0" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#121714" media="(prefers-color-scheme: dark)">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="カロリーノート">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<style>:root{padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}body{margin:0}img{max-width:100%}[hidden]{display:none!important}</style>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Zen+Kaku+Gothic+New:wght@400;500;700;900&family=Roboto+Mono:wght@500;600&display=swap">
@@ -189,6 +202,9 @@ textarea.input{resize:vertical;min-height:72px}
 }
 </style>
 
+
+</head>
+<body>
 <div class="wrap" id="app"></div>
 <nav class="tabs" aria-label="画面切り替え"><div class="in" role="tablist" id="tabs"></div></nav>
 <div id="overlay"></div>
@@ -530,7 +546,11 @@ function viewSettings(){
     <div class="hint">${S.mode==="db" ? "記録はクラウドに保存され、スマホとパソコンのどちらで開いても同じデータが見られます。見られるのはあなただけです。" : "記録はこのブラウザの中にだけ保存されています。"}</div>
     <div style="display:flex;gap:8px;flex-wrap:wrap">
       <button class="btn ghost small" data-act="export">記録をJSONでコピー</button>
+      <button class="btn ghost small" data-act="import-toggle" aria-expanded="${!!S.importOpen}">記録を取り込む</button>
     </div>
+    ${S.importOpen ? `<div class="field"><label for="import-text">「記録をJSONでコピー」でコピーした内容を貼り付け</label>
+      <textarea id="import-text" class="input" placeholder='{"days":{...}}'></textarea>
+      <button class="btn small" data-act="import-run" style="justify-self:start">取り込む</button></div>` : ""}
   </div>`;
 }
 
@@ -690,9 +710,30 @@ document.addEventListener("click", e => {
     case "range": S.range=+v; render(); break;
     case "ai-run": { const t=($("#ai-text")?.value||"").trim(); sh.aiText=t; if(!t){ toast("食べたものを入力してください"); break; } runAI(t); break; }
     case "ai-add": { const on=sh.ai.items.filter(x=>x.on); on.forEach(x=>{ addMeal(x,1); if(sh.fav) addFav({...x,unit:"AI推定"}); }); toast(`${on.length}品を追加しました`); closeSheet(); break; }
+    case "import-toggle": S.importOpen = !S.importOpen; render(); break;
+    case "import-run": importData($("#import-text")?.value || ""); break;
     case "export": { const txt=JSON.stringify({profile:S.profile,foods:S.foods,days:S.days},null,1); navigator.clipboard?.writeText(txt).then(()=>toast("コピーしました"),()=>toast("コピーできませんでした")) ?? toast("コピーできませんでした"); break; }
   }
 });
+function importData(text){
+  let j;
+  try{ j = JSON.parse(text); }catch(e){ j = null; }
+  if(!j || typeof j !== "object"){ toast("読み込めませんでした。コピーしたJSONをそのまま貼り付けてください"); return; }
+  let n = 0;
+  for(const [k,v] of Object.entries(j.days || {})){
+    if(!/^\d{4}-\d{2}-\d{2}$/.test(k) || !v || typeof v !== "object") continue;
+    S.days[k] = {meals: Array.isArray(v.meals) ? v.meals : [], weight: v.weight ?? null, exercise: v.exercise || 0};
+    saveDay(k); n++;
+  }
+  if(Array.isArray(j.foods)){
+    let added = false;
+    for(const f of j.foods){ if(f && f.name && !S.foods.some(x=>x.name===f.name)){ S.foods.push(f); added = true; } }
+    if(added) saveFoods();
+  }
+  if(j.profile && typeof j.profile === "object"){ S.profile = {...j.profile}; delete S.profile.example; saveProfile(); }
+  S.importOpen = false; S.draft = null; render();
+  toast(n ? `${n}日分の記録を取り込みました` : "取り込める記録がありませんでした");
+}
 document.addEventListener("input", e => {
   const a = e.target.dataset?.act, sh=S.sheet;
   if(a==="q"){ sh.q=e.target.value; $("#food-list").innerHTML=foodListHtml(sh); }
@@ -745,6 +786,9 @@ document.addEventListener("submit", e => {
 document.addEventListener("keydown", e => { if(e.key==="Escape" && S.sheet) closeSheet(); });
 
 /* ---------- 起動 ---------- */
+if("serviceWorker" in navigator && /^https?:$/.test(location.protocol)){
+  window.addEventListener("load", () => navigator.serviceWorker.register("sw.js").catch(()=>{}));
+}
 lsLoad();
 render();
 
@@ -780,4 +824,5 @@ if(window.claude?.use){
 }
 })();
 </script>
-</body></html>
+</body>
+</html>
